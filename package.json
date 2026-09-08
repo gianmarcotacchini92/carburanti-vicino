@@ -1,0 +1,53 @@
+{
+  "name": "carburanti-vicino",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "tsx watch server/index.ts",
+    "dev:client": "vite --host 127.0.0.1",
+    "start": "tsx server/index.ts",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "test": "node --import tsx --test server/*.test.ts",
+    "test:e2e": "playwright test",
+    "preview": "vite preview",
+    "worker:check": "tsc -p tsconfig.worker.json",
+    "worker:test": "node --import tsx --test cloudflare/*.test.ts",
+    "worker:dev": "wrangler dev --port 8787",
+    "worker:deploy": "wrangler deploy",
+    "cloud:job": "tsx jobs/run.ts"
+  },
+  "dependencies": {
+    "csv-parse": "^6.1.0",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.2.1",
+    "helmet": "^8.1.0",
+    "leaflet": "^1.9.4",
+    "lucide-react": "^0.468.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-leaflet": "^5.0.0",
+    "tsx": "^4.21.0",
+    "web-push": "^3.6.7",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260908.1",
+    "@playwright/test": "^1.58.0",
+    "@types/express": "^5.0.6",
+    "@types/leaflet": "^1.9.21",
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@types/web-push": "^3.6.4",
+    "@vitejs/plugin-react": "^6.1.0",
+    "concurrently": "^9.2.1",
+    "oxlint": "^1.79.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.2.2",
+    "wrangler": "^4.129.1"
+  }
+}

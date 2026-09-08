@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "carburanti-vicino-api",
+  "main": "cloudflare/worker.ts",
+  "compatibility_date": "2026-09-08",
+  "workers_dev": true,
+  "vars": {
+    "APP_ORIGIN": "https://gianmarcotacchini92.github.io",
+    "APP_BASE_PATH": "/carburanti-vicino/",
+    "GEOCODER_URL": "https://photon.komoot.io/api/"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "carburanti-vicino",
+      "database_id": "ef4deaf6-fa6a-402e-b883-dc5bf74f1c28",
+      "migrations_dir": "cloudflare/migrations"
+    }
+  ],
+  "observability": { "enabled": false }
+}

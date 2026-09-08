@@ -1,0 +1,31 @@
+name: Aggiorna prezzi e invia avvisi
+on:
+  schedule:
+    - cron: "17,47 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prezzi-e-avvisi
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --omit=dev --no-audit --no-fund
+      - run: npm run cloud:job
+        env:
+          API_URL: ${{ vars.API_URL }}
+          APP_URL: https://gianmarcotacchini92.github.io/carburanti-vicino/
+          JOB_TOKEN: ${{ secrets.JOB_TOKEN }}
+          VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
