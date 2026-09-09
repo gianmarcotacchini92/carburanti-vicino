@@ -1,7 +1,7 @@
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 
-if (process.env.VITE_CATALOG_MODE === 'true' && !process.env.VITE_API_URL?.startsWith('https://')) {
+if (process.env.VITE_BASE_PATH && process.env.VITE_BASE_PATH !== '/' && !process.env.VITE_API_URL?.startsWith('https://')) {
   throw new Error('La build Pages richiede VITE_API_URL con il backend HTTPS configurato.')
 }
 

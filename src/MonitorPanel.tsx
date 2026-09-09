@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Bell, BellOff, Check, ChevronRight, LoaderCircle, MapPin, RefreshCw, ShieldCheck, X } from 'lucide-react'
 import type { Monitor, PushCredentials, SearchArea } from '../shared/types'
-import { api, ApiError, appBase, areaQuery, cloudCatalog, errorMessage, fuelLabel, serviceLabel } from './lib'
+import { api, ApiError, appBase, areaQuery, cloudBackend, errorMessage, fuelLabel, serviceLabel } from './lib'
 
 const STORAGE_KEY = appBase === '/' ? 'pieno.push.v1' : `pieno.push.v1:${appBase}`
 const supportsPush = () => window.isSecureContext && 'serviceWorker' in navigator
@@ -210,7 +210,7 @@ export default function MonitorPanel({ area, label }: { area: SearchArea; label:
         )}
         {!monitor && <p className="monitor-current">Zona da monitorare: <strong>{label}</strong> · {fuelLabel(area.fuel)} · {serviceLabel(area.service)} · {area.radius} km</p>}
         {changed && <p className="monitor-change">Stai esplorando un’altra zona o altri filtri. Gli avvisi non sono cambiati.</p>}
-        <p className="monitor-conditions">{cloudCatalog
+        <p className="monitor-conditions">{cloudBackend
           ? 'Avvisi anche a pagina chiusa: controlli programmati ogni 30 minuti tramite GitHub Actions, con possibili ritardi. Browser e sistema operativo devono consentire le notifiche. Una zona per browser.'
           : 'Funzionano anche a pagina chiusa solo se il server rimane attivo e il browser e il sistema operativo lo consentono. Una zona per browser.'}</p>
         {(!supported || (isiOS && !standalone)) && (
@@ -247,7 +247,7 @@ export default function MonitorPanel({ area, label }: { area: SearchArea; label:
         {expanded && (
           <div className="monitor-help" id="monitor-help">
             <ShieldCheck size={18} />
-            <p>La soglia è almeno il 25% sotto la mediana di almeno 5 <strong>altri</strong> distributori con lo stesso carburante e la stessa modalità di servizio, entro il raggio scelto. Sono esclusi i prezzi più vecchi di 7 giorni. È un segnale di possibile anomalia, non la garanzia di un affare. Inviamo al server le coordinate della zona salvata e l’iscrizione push, non seguiamo i tuoi spostamenti.</p>
+            <p>La soglia è almeno il 25% sotto la mediana di almeno 5 <strong>altri</strong> distributori con lo stesso carburante e la stessa modalità di servizio, entro il raggio scelto. Prima di inviare una notifica ricontrolliamo i prezzi nella scheda corrente MIMIT ed escludiamo quelli più vecchi di 7 giorni. Se il controllo non riesce, non inviamo avvisi basati sui CSV. È un segnale di possibile anomalia, non la garanzia di un affare. Inviamo al server le coordinate della zona salvata e l’iscrizione push, non seguiamo i tuoi spostamenti.</p>
           </div>
         )}
         {notice && <p className="monitor-notice" role="status"><Check size={16} />{notice}</p>}

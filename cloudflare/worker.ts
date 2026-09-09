@@ -1,10 +1,15 @@
-﻿export interface Env {
+﻿import { createMimitLiveClient } from '../shared/mimit-live.ts'
+import type { MimitLiveCache } from '../shared/mimit-live.ts'
+import type { SearchArea, StatusResponse } from '../shared/types.ts'
+
+export interface Env {
   DB: D1Database
   APP_ORIGIN?: string
   APP_BASE_PATH?: string
   VAPID_PUBLIC_KEY: string
   JOB_TOKEN: string
   GEOCODER_URL?: string
+  MIMIT_API_URL?: string
 }
 
 type Json = Record<string, unknown>
@@ -218,6 +223,82 @@ async function rateLimitSubscriptionWrite(db: D1Database, request: Request) {
   if ((result.meta?.changes ?? 0) !== 1) fail(429, 'Troppe attivazioni. Riprova tra un minuto.')
 }
 
+async function rateLimitLiveSource(db: D1Database, request: Request, env: Env) {
+  if (env.JOB_TOKEN && bearer(request) === env.JOB_TOKEN) return
+  const minute = Math.floor(Date.now() / 60_000)
+  const key = `live:${clientIp(request)}:${minute}`
+  await db.prepare('INSERT OR IGNORE INTO limits(key,value) VALUES(?,0)').bind(key).run()
+  const result = await db.prepare('UPDATE limits SET value = value + 1 WHERE key = ? AND value < 30').bind(key).run()
+  if ((result.meta?.changes ?? 0) !== 1) fail(429, 'Troppe richieste alla fonte live. Riprova tra un minuto.')
+}
+
+function validateAreaParams(params: URLSearchParams): SearchArea {
+  const fuel = params.get('fuel')
+  const service = params.get('service')
+  if (!['benzina', 'gasolio', 'gpl', 'metano'].includes(String(fuel))) fail(400, 'Parametri non validi.')
+  if (!['self', 'servito', 'all'].includes(String(service))) fail(400, 'Parametri non validi.')
+  return {
+    lat: numberIn(params.get('lat'), 35, 48),
+    lon: numberIn(params.get('lon'), 6, 19),
+    radius: numberIn(params.get('radius'), 1, 30),
+    fuel: fuel as SearchArea['fuel'],
+    service: service as SearchArea['service'],
+  }
+}
+
+function refreshParam(params: URLSearchParams) {
+  const refresh = params.get('refresh')
+  if (refresh === null) return false
+  if (refresh === '1') return true
+  fail(400, 'Parametri non validi.')
+}
+
+function liveStatus(): StatusResponse {
+  return {
+    ready: true, refreshing: false, lastRefreshAt: null, sourceDate: null,
+    stationCount: 0, priceCount: 0, warning: null, dataSource: 'live',
+  }
+}
+
+function liveCache(db: D1Database): MimitLiveCache {
+  return {
+    async get(key: string, maxAgeSeconds: number) {
+      const row = await db.prepare('SELECT payload FROM mimit_cache WHERE key = ? AND created_at >= ?')
+        .bind(key, Date.now() - maxAgeSeconds * 1000).first<{ payload: string }>()
+      return row?.payload ?? null
+    },
+    async set(key: string, payload: string) {
+      const now = Date.now()
+      await db.batch([
+        db.prepare('INSERT INTO mimit_cache(key,payload,created_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload, created_at=excluded.created_at')
+          .bind(key, payload, now),
+        db.prepare('DELETE FROM mimit_cache WHERE created_at < ?').bind(now - 24 * 3_600_000),
+        db.prepare('DELETE FROM mimit_cache WHERE key IN (SELECT key FROM mimit_cache ORDER BY created_at DESC LIMIT -1 OFFSET 1000)'),
+      ])
+    },
+  }
+}
+
+function liveClient(request: Request, env: Env) {
+  return createMimitLiveClient({
+    cache: liveCache(env.DB),
+    baseUrl: env.MIMIT_API_URL,
+    beforeUncachedRequest: () => rateLimitLiveSource(env.DB, request, env),
+  })
+}
+
+async function handleLiveStations(request: Request, env: Env) {
+  const url = new URL(request.url)
+  const area = validateAreaParams(url.searchParams)
+  return json(await liveClient(request, env).fetchStations(area, { refresh: refreshParam(url.searchParams) }))
+}
+
+async function handleLiveStationDetail(request: Request, env: Env, rawId: string) {
+  const url = new URL(request.url)
+  const id = integerIn(rawId, 1, 50_000_000)
+  return json(await liveClient(request, env).fetchStation(id, { refresh: refreshParam(url.searchParams) }))
+}
+
 function snapshotResponse(row: SnapshotRow, warning = row.warning) {
   return {
     ready: true,
@@ -246,10 +327,8 @@ async function currentSnapshot(db: D1Database) {
 }
 
 async function handleStatus(env: Env) {
-  const row = await currentSnapshot(env.DB)
-  const warning = await env.DB.prepare('SELECT value FROM metadata WHERE key = ?').bind('warning').first<{ value: string }>()
-  if (!row) return json({ ready: false, refreshing: false, lastRefreshAt: null, sourceDate: null, stationCount: 0, priceCount: 0, warning: warning?.value ?? null })
-  return json(snapshotResponse(row, freshnessWarning(row, warning?.value)))
+  void env
+  return json(liveStatus())
 }
 
 async function handleCatalog(env: Env, version: string, cell: string) {
@@ -487,7 +566,9 @@ async function cleanup(env: Env) {
     env.DB.prepare('DELETE FROM push_sent WHERE sent_at < ?').bind(oldSent),
     env.DB.prepare('DELETE FROM tiles WHERE version IN (SELECT version FROM snapshots WHERE published = 0 AND created_at < ?)').bind(new Date(Date.now() - 24 * 3_600_000).toISOString()),
     env.DB.prepare('DELETE FROM snapshots WHERE published = 0 AND created_at < ?').bind(new Date(Date.now() - 24 * 3_600_000).toISOString()),
-    env.DB.prepare('DELETE FROM limits WHERE key LIKE ?').bind('sub:%'),
+    env.DB.prepare('DELETE FROM limits WHERE key LIKE ? OR key LIKE ?').bind('sub:%', 'live:%'),
+    env.DB.prepare('DELETE FROM mimit_cache WHERE created_at < ?').bind(Date.now() - 24 * 3_600_000),
+    env.DB.prepare('DELETE FROM mimit_cache WHERE key IN (SELECT key FROM mimit_cache ORDER BY created_at DESC LIMIT -1 OFFSET 1000)'),
   ])
   await cleanupPublished(env)
   return json({ ok: true })
@@ -550,11 +631,14 @@ async function routeApi(request: Request, env: Env, path: string) {
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders(request, env) })
   if (['POST', 'PUT', 'DELETE'].includes(request.method)) requireOrigin(request, env)
   if (request.method === 'GET' && path === '/api/status') return handleStatus(env)
+  if (request.method === 'GET' && path === '/api/stations') return handleLiveStations(request, env)
   if (request.method === 'GET' && path === '/api/geocode') return handleGeocode(request, env)
   if (request.method === 'GET' && path === '/api/push/public-key') return json({ publicKey: env.VAPID_PUBLIC_KEY })
   if (request.method === 'POST' && path === '/api/push/subscriptions') return createSubscription(request, env)
   let match = path.match(/^\/api\/catalog\/([^/]+)\/([^/]+)$/)
   if (request.method === 'GET' && match) return handleCatalog(env, match[1]!, match[2]!)
+  match = path.match(/^\/api\/stations\/([^/]+)$/)
+  if (request.method === 'GET' && match) return handleLiveStationDetail(request, env, decodeURIComponent(match[1]!))
   match = path.match(/^\/api\/push\/subscriptions\/([^/]+)$/)
   if (match) {
     const id = decodeURIComponent(match[1]!)
@@ -574,6 +658,10 @@ async function handle(request: Request, env: Env): Promise<Response> {
     return withCors(json({ error: 'Risorsa non trovata.' }, 404), request, env)
   } catch (error) {
     if (error instanceof ApiError) return path.startsWith('/internal/') ? json({ error: error.message, details: error.details }, error.status) : withCors(json({ error: error.message, details: error.details }, error.status), request, env)
+    if (error instanceof Error && 'status' in error && typeof error.status === 'number') {
+      const res = json({ error: error.message }, error.status)
+      return path.startsWith('/internal/') ? res : withCors(res, request, env)
+    }
     console.error('Errore API:', error instanceof Error ? error.message : 'errore sconosciuto')
     const res = json({ error: 'Errore del server. Riprova tra poco.' }, 500)
     return path.startsWith('/internal/') ? res : withCors(res, request, env)

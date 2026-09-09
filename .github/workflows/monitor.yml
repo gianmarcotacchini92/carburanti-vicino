@@ -1,4 +1,4 @@
-name: Aggiorna prezzi e invia avvisi
+name: Controlla prezzi correnti e invia avvisi
 on:
   schedule:
     - cron: "17,47 * * * *"

@@ -4,7 +4,7 @@ const pages = process.env.PAGES_E2E === '1'
 
 export default defineConfig({
   testDir: './tests',
-  testMatch: pages ? '**/pages.spec.ts' : '**/{app,push,service-worker}.spec.ts',
+  testMatch: pages ? '**/pages.spec.ts' : '**/{app,live,push,service-worker}.spec.ts',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,

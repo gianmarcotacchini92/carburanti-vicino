@@ -12,18 +12,27 @@ Backend: https://carburanti-vicino-api.gianmarcotacchini.workers.dev
 Questa versione supporta anche una distribuzione senza un server Node acceso:
 
 - **GitHub Pages** ospita il frontend pubblico in `/carburanti-vicino/`.
-- **Cloudflare Workers + D1** conservano catalogo e monitoraggi, gestiscono
+- **Cloudflare Workers + D1** conservano cache breve e monitoraggi, gestiscono
   geocodifica e sottoscrizioni push. Nessun piano a pagamento viene attivato.
 - **GitHub Actions**, nel repository pubblico, esegue un job ogni 30 minuti:
-  scarica i dati MIMIT se l'ultima importazione ha piu di 6 ore e invia gli avvisi.
+  consulta i prezzi correnti per le zone monitorate, ricontrolla le schede degli
+  impianti con possibili anomalie e invia gli avvisi confermati.
   Il telefono e il PC non devono tenere aperta la pagina.
 
-Il catalogo viene diviso in celle geografiche con versioni immutabili. Il browser
-scarica solo le celle vicine e usa la stessa logica di calcolo del backend locale.
-Il Worker non esegue l'importazione massiva ne la crittografia push, evitando
-di concentrare questi lavori nei **10 ms CPU** del piano Workers gratuito.
-La nuova versione diventa visibile solo dopo il caricamento completo delle celle;
-quella precedente resta disponibile per le richieste gia in corso.
+**Dal 9 settembre 2026 la ricerca non usa piu il catalogo CSV giornaliero.**
+Il Worker interroga la ricerca geografica del portale MIMIT e conserva le
+risposte per **massimo 120 secondi**. Il pulsante "Aggiorna prezzi" forza una
+nuova lettura; la pagina ripete la ricerca ogni minuto quando e visibile.
+Se la fonte corrente non risponde, viene mostrato un errore: nessun fallback
+silenzioso ai prezzi del giorno precedente.
+
+Quando si seleziona un impianto, l'app ne legge la scheda corrente per indirizzo,
+singoli prezzi e relative date. Mappa, elenco e costo del pieno vengono aggiornati
+insieme; se il prezzo e stato rimosso non viene mantenuto il valore precedente.
+Gli endpoint di consultazione usati sono quelli del portale web, non un'API
+pubblica con un contratto di stabilita o SLA: eventuali cambiamenti possono
+richiedere un adattamento. Le richieste sono limitate e memorizzate brevemente.
+Il Worker non esegue crittografia push: gli invii restano nel job Node di Actions.
 
 ### Limiti da conoscere
 
@@ -38,8 +47,9 @@ I job programmati di GitHub Actions possono essere ritardati o saltati nei
 periodi di carico. Nei repository pubblici GitHub puo disattivarli dopo
 **60 giorni senza attivita nel repository**: controllare la scheda Actions
 e riattivare il workflow se necessario. Non e quindi un servizio con SLA.
-I prezzi restano giornalieri e le notifiche sono di tipo best-effort, non istantanee.
-In caso di dati vecchi l'app avvisa e gli invii vengono sospesi.
+Le ricerche dei prezzi non dipendono dagli orari di Actions. Le notifiche, invece,
+sono di tipo best-effort, non istantanee. In caso di fonte non disponibile o di
+verifica dei prezzi incompleta gli invii vengono sospesi per la zona interessata.
 
 ### Gestione del deploy
 
@@ -58,7 +68,7 @@ npx.cmd wrangler d1 migrations apply carburanti-vicino --remote
 npm.cmd run worker:deploy
 ```
 
-Per ripetere la configurazione iniziale privata e caricare il catalogo:
+Per ripetere la configurazione iniziale privata ed eseguire il monitoraggio:
 
 ```powershell
 $env:API_URL = "https://URL-DEL-WORKER.workers.dev"
@@ -85,9 +95,10 @@ npm.cmd install
 npm.cmd run dev
 ```
 
-Aprire **http://localhost:5173**. Frontend e API partono insieme; il primo
-avvio scarica i due CSV ufficiali. Durante il caricamento non vengono mostrati
-prezzi inventati. Servono una connessione Internet e l'accesso ai servizi esterni.
+Aprire **http://localhost:5173**. Frontend e API partono insieme e interrogano
+il portale corrente su richiesta, senza attendere il download dei CSV nazionali.
+Durante il caricamento non vengono mostrati prezzi inventati.
+Servono una connessione Internet e l'accesso ai servizi esterni.
 `npm.cmd` evita il blocco di `npm.ps1` con le policy standard di PowerShell.
 
 Per servire il frontend compilato dalla stessa API:
@@ -123,23 +134,28 @@ Fonti:
 - [Osservaprezzi Carburanti](https://carburanti.mise.gov.it/ospzSearch/)
 
 Fonte: **Ministero delle Imprese e del Made in Italy - Osservaprezzi Carburanti**.
-Dati distribuiti con licenza [IODL 2.0](https://www.dati.gov.it/content/italian-open-data-license-v20).
+I dataset CSV sono distribuiti con licenza [IODL 2.0](https://www.dati.gov.it/content/italian-open-data-license-v20).
 Elaborazione indipendente; servizio non ufficiale.
 
 I CSV sono pubblicati quotidianamente e descrivono le informazioni in vigore
 **alle 08:00 del giorno precedente alla pubblicazione**, non prezzi in tempo reale.
 La data di estrazione nel file identifica lo snapshot, non il download.
-L'app cerca
-aggiornamenti ogni 6 ore; riprova ogni 15 minuti in caso di errore. Conserva
-l'ultima coppia completa e valida se un download fallisce, le date dei file non
-coincidono o il dataset sembra incompleto. Il banner espone l'errore e le date:
-la cache non viene presentata come dato nuovo.
+Questo era il motivo per cui la prima versione poteva avere prezzi gia superati
+sul portale. Il codice di importazione e le vecchie celle sono conservati per
+compatibilita, ma **non alimentano piu la ricerca o le notifiche** e non vengono
+usati come fallback. Il nuovo percorso legge `/ospzApi/search/zone` e
+`/ospzApi/registry/servicearea/{id}` del portale tramite il backend.
+
+La ricerca geografica riporta l'ultima comunicazione dell'impianto, non
+necessariamente quella di ciascun prezzo. La UI distingue questa data da
+quella specifica della scheda e dall'orario della nostra consultazione.
+Non si rinomina lo snapshot di ieri come "oggi" per farlo sembrare aggiornato.
 
 I prezzi sono quelli comunicati dagli esercenti. Coordinate mancanti/non valide
 non sono mappabili; carburanti speciali/premium non sono mescolati ai prodotti
 standard Benzina, Gasolio, GPL e Metano. Non si deducono apertura o disponibilita.
 
-Il formato ufficiale usa `|` dal 10 febbraio 2026; sono gestiti anche i vecchi
+L'importatore CSV legacy usa `|` dal 10 febbraio 2026; sono gestiti anche i vecchi
 CSV con `;`. Alcune righe della fonte contengono delimitatori non protetti:
 quelle con numero di colonne incoerente vengono escluse e conteggiate nei log,
 senza spostare arbitrariamente i campi. Oltre l'1% di righe malformate o una
@@ -150,8 +166,11 @@ Vedi i [metadati ufficiali](https://www.mimit.gov.it/images/stories/documenti/Me
 
 Un prezzo viene segnalato quando e **almeno il 25% sotto la mediana di almeno
 5 ALTRI impianti**, nella zona cercata, con lo stesso carburante e la stessa
-modalita self/servito. Il prezzo candidato e quelli di confronto devono essere
-stati comunicati negli ultimi 7 giorni. In modalita "tutti" self e servito sono
+modalita self/servito. Gli indicatori della mappa sono preliminari: la ricerca
+fornisce una data aggregata dell'impianto. Prima di inviare push il job consulta
+le schede dei candidati e dei pari per confermare prezzo e data specifici:
+il prezzo candidato e quelli di confronto devono essere stati comunicati
+negli ultimi 7 giorni. In modalita "tutti" self e servito sono
 comunque analizzati separatamente. La mediana riassuntiva della zona, invece,
 rappresenta tutti i prezzi recenti dei filtri selezionati.
 
@@ -163,8 +182,9 @@ data, campione e modalita contano piu del semplice prezzo minimo.
 ## Notifiche push
 
 Il consenso viene chiesto solo premendo il pulsante di attivazione. La pagina
-puo essere chiusa: il server controlla la zona ogni 15 minuti e dopo gli
-aggiornamenti, inviando una notifica tramite il gateway del browser. Le notifiche
+puo essere chiusa: Actions controlla la zona ogni 30 minuti nella pubblicazione
+gratuita; il server locale ogni 15 minuti. Gli avvisi passano tramite il gateway
+del browser. Le notifiche
 non richiedono che il JavaScript della pagina rimanga aperto.
 
 Condizioni reali di funzionamento:
@@ -187,8 +207,9 @@ Gli avvisi sono raggruppati per zona e deduplicati per impianto, carburante,
 modalita e prezzo per 90 giorni; una comunicazione della stessa cifra il giorno
 dopo non genera una nuova notifica. Cambiare la zona azzera la deduplicazione.
 Invii falliti vengono ritentati, sottoscrizioni scadute (404/410) eliminate.
-Con una copia locale vecchia di oltre 36 ore gli invii sono sospesi.
-Non sono notifiche istantanee di ogni variazione: la fonte e giornaliera.
+Se la ricerca corrente non riesce o i dettagli necessari non sono disponibili,
+gli invii vengono sospesi per quel monitoraggio e ritentati al ciclo seguente.
+Non sono notifiche istantanee di ogni variazione: il job deve essere eseguito.
 
 ## Pubblicazione persistente con HTTPS
 
@@ -235,7 +256,8 @@ i risultati per 7 giorni. Per traffico significativo configurare `GEOCODER_URL`
 con un'istanza Photon propria o un servizio compatibile: non affidarsi alla
 demo pubblica come servizio con SLA.
 
-Gli indirizzi digitati passano al backend e a Photon; i tile comunicano a OSM
+Le coordinate delle ricerche e delle zone monitorate vengono inoltrate al
+servizio MIMIT, senza le credenziali push. Gli indirizzi digitati passano al backend e a Photon; i tile comunicano a OSM
 l'area visualizzata e l'IP del browser. Evitare indirizzi riservati. La posizione
 GPS viene acquisita solo su richiesta. Attivando un monitoraggio, coordinate,
 raggio, filtri ed endpoint push sono salvati sul server; le credenziali per

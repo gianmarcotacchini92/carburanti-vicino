@@ -3,16 +3,22 @@ import type { DatabaseSync } from 'node:sqlite'
 import webpush from 'web-push'
 import { z } from 'zod'
 import { config } from './config.ts'
-import { getMetadata, searchStations, setMetadata } from './storage.ts'
+import { getMetadata, setMetadata } from './storage.ts'
 import { createSubscriptionSchema, HttpError, monitorSchema, subscriptionSchema } from './validation.ts'
-import type { Monitor, PushCredentials } from '../shared/types.ts'
+import type { LiveStationDetail, Monitor, PushCredentials, SearchArea, StationsResponse } from '../shared/types.ts'
+import { confirmLiveAnomalies, fetchLiveStation, fetchLiveStations } from '../shared/mimit-live.ts'
 import { priceFingerprint, pushMessage } from '../shared/push-message.ts'
 
 type Sender = typeof webpush.sendNotification
+type LiveClient = {
+  fetchStations(area: SearchArea): Promise<StationsResponse>
+  fetchStation(id: number, options?: { refresh?: boolean }): Promise<LiveStationDetail>
+}
 const hash = (token: string) => createHash('sha256').update(token).digest('hex')
 const keysSchema = z.object({ publicKey: z.string(), privateKey: z.string() })
+const defaultLiveClient: LiveClient = { fetchStations: fetchLiveStations, fetchStation: fetchLiveStation }
 
-export function createPushService(db: DatabaseSync, sender: Sender = webpush.sendNotification) {
+export function createPushService(db: DatabaseSync, sender: Sender = webpush.sendNotification, liveClient: LiveClient = defaultLiveClient) {
   const storedKeys = getMetadata(db, 'vapidKeys')
   const keys = storedKeys ? keysSchema.parse(JSON.parse(storedKeys)) : webpush.generateVAPIDKeys()
   if (!storedKeys) setMetadata(db, 'vapidKeys', JSON.stringify(keys))
@@ -72,11 +78,7 @@ export function createPushService(db: DatabaseSync, sender: Sender = webpush.sen
   }
 
   async function scan() {
-    if (scanning || !getMetadata(db, 'lastRefreshAt')) return
-    if (Date.now() - Date.parse(getMetadata(db, 'lastRefreshAt')!) > 36 * 3_600_000) {
-      console.warn('Push sospese: copia locale dei prezzi vecchia di oltre 36 ore.')
-      return
-    }
+    if (scanning) return
     scanning = true
     try {
       db.prepare('DELETE FROM push_sent WHERE sent_at < ?').run(new Date(Date.now() - 90 * 86_400_000).toISOString())
@@ -84,7 +86,26 @@ export function createPushService(db: DatabaseSync, sender: Sender = webpush.sen
         const id = String(row.id)
         const monitor = monitorSchema.parse(JSON.parse(String(row.monitor)))
         const subscription = subscriptionSchema.parse(JSON.parse(String(row.subscription)))
-        const anomalies = searchStations(db, monitor).stations.filter((station) => station.isAnomaly)
+        let anomalies
+        try {
+          const result = await liveClient.fetchStations(monitor)
+          const candidates = result.stations.map((station) => ({
+            station,
+            fingerprint: priceFingerprint(station, monitor),
+          }))
+          if (!candidates.some(({ station, fingerprint }) =>
+            station.isAnomaly && !db.prepare('SELECT 1 FROM push_sent WHERE subscription_id = ? AND fingerprint = ?').get(id, fingerprint))) continue
+          const confirmable = {
+            ...result,
+            stations: result.stations.map((station) =>
+              db.prepare('SELECT 1 FROM push_sent WHERE subscription_id = ? AND fingerprint = ?')
+                .get(id, priceFingerprint(station, monitor)) ? { ...station, isAnomaly: false } : station),
+          }
+          anomalies = await confirmLiveAnomalies(confirmable, monitor, (stationId) => liveClient.fetchStation(stationId, { refresh: true }))
+        } catch (error) {
+          console.error(`Monitoraggio push ${id} sospeso: ${error instanceof Error ? error.message : 'fonte live non disponibile'}.`)
+          continue
+        }
         const unseen = anomalies.map((station) => ({
           station,
           fingerprint: priceFingerprint(station, monitor),

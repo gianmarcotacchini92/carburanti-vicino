@@ -9,15 +9,29 @@ import { rateLimit } from 'express-rate-limit'
 import { z } from 'zod'
 import { config } from './config.ts'
 import { createGeocoder } from './geocoder.ts'
-import { searchStations } from './storage.ts'
 import { areaSchema, HttpError } from './validation.ts'
 import type { createPushService } from './push.ts'
 import type { StatusResponse } from '../shared/types.ts'
+import { fetchLiveStation, fetchLiveStations } from '../shared/mimit-live.ts'
+
+type LiveClient = {
+  fetchStations: typeof fetchLiveStations
+  fetchStation: typeof fetchLiveStation
+}
+
+const defaultLiveClient: LiveClient = { fetchStations: fetchLiveStations, fetchStation: fetchLiveStation }
+
+function refreshParam(value: unknown) {
+  if (value === undefined) return false
+  if (value === '1') return true
+  throw new HttpError(400, 'Parametri non validi.')
+}
 
 export function createApp(
   db: DatabaseSync,
   push: ReturnType<typeof createPushService>,
   status: () => StatusResponse,
+  liveClient: LiveClient = defaultLiveClient,
 ) {
   const app = express()
   const geocode = createGeocoder(db)
@@ -50,10 +64,13 @@ export function createApp(
   })
   app.use(express.json({ limit: '16kb' }))
   app.get('/api/status', (_req, res) => res.json(status()))
-  app.get('/api/stations', (req, res) => {
+  app.get('/api/stations', async (req, res) => {
     const area = areaSchema.parse(req.query)
-    if (!status().ready) throw new HttpError(503, 'Sto caricando i dati ufficiali MIMIT. Attendi il completamento del primo download.')
-    res.json(searchStations(db, area))
+    res.json(await liveClient.fetchStations(area, { refresh: refreshParam(req.query.refresh) }))
+  })
+  app.get('/api/stations/:id', async (req, res) => {
+    const id = z.coerce.number().int().positive().max(50_000_000).parse(req.params.id)
+    res.json(await liveClient.fetchStation(id, { refresh: refreshParam(req.query.refresh) }))
   })
   app.get('/api/geocode', rateLimit({
     windowMs: 60_000, limit: 15, standardHeaders: 'draft-8', legacyHeaders: false,
@@ -102,8 +119,8 @@ export function createApp(
       res.status(400).json({ error: 'JSON non valido.' })
       return
     }
-    if (error instanceof Error && 'status' in error && error.status === 413) {
-      res.status(413).json({ error: 'Richiesta troppo grande.' })
+    if (error instanceof Error && 'status' in error && typeof error.status === 'number') {
+      res.status(error.status).json({ error: error.status === 413 ? 'Richiesta troppo grande.' : error.message })
       return
     }
     console.error('Errore API:', error instanceof Error ? error.message : 'errore sconosciuto')

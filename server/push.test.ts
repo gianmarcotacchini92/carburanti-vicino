@@ -3,8 +3,10 @@ import { randomBytes } from 'node:crypto'
 import { test } from 'node:test'
 import webpush from 'web-push'
 import { createPushService } from './push.ts'
-import { openDatabase, setMetadata } from './storage.ts'
+import { openDatabase } from './storage.ts'
 import { allowedPushEndpoint } from './validation.ts'
+import { parseLiveArea, parseLiveDetail } from '../shared/mimit-live.ts'
+import type { SearchArea } from '../shared/types.ts'
 
 const monitor = { lat: 41.9, lon: 12.5, radius: 5, fuel: 'benzina', service: 'self', label: 'Zona test' }
 const subscription = {
@@ -13,13 +15,34 @@ const subscription = {
 }
 
 function fixture() {
-  const db = openDatabase(':memory:')
-  for (let id = 1; id <= 6; id++) {
-    db.prepare('INSERT INTO stations VALUES(?,?,?,?,?,?,?,?)').run(id, `Test ${id}`, 'Test', 'Via test', 'Roma', 'RM', 41.9, 12.5)
-    db.prepare('INSERT INTO prices VALUES(?,?,?,?,?)').run(id, 'benzina', 1, id === 1 ? 0.5 : 2, new Date().toISOString())
+  return openDatabase(':memory:')
+}
+
+function liveClient(price: () => number, fail = () => false) {
+  const now = new Date().toISOString()
+  return {
+    async fetchStations(area: SearchArea) {
+      if (fail()) throw new Error('fonte non disponibile')
+      return parseLiveArea({
+        success: true,
+        results: Array.from({ length: 6 }, (_, i) => {
+          const id = i + 1
+          return {
+            id, name: `Test ${id}`, brand: 'Test', address: 'Via test',
+            location: { lat: 41.9, lng: 12.5 }, insertDate: now,
+            fuels: [{ fuelId: 1, price: id === 1 ? price() : 2, isSelf: true }],
+          }
+        }),
+      }, area, now)
+    },
+    async fetchStation(id: number) {
+      if (fail()) throw new Error('fonte non disponibile')
+      return parseLiveDetail({
+        id, name: `Test ${id}`, brand: 'Test', address: 'Via test',
+        fuels: [{ fuelId: 1, price: id === 1 ? price() : 2, isSelf: true, insertDate: now }],
+      }, id, now)
+    },
   }
-  setMetadata(db, 'lastRefreshAt', new Date().toISOString())
-  return db
 }
 
 test('endpoint push accetta solo gateway HTTPS conosciuti', () => {
@@ -33,11 +56,12 @@ test('endpoint push accetta solo gateway HTTPS conosciuti', () => {
 
 test('sottoscrizioni protette da token; push deduplicate e nuove variazioni inviate', async () => {
   const db = fixture()
+  let lowPrice = 0.5
   const payloads: string[] = []
   const push = createPushService(db, async (_subscription, payload) => {
     payloads.push(String(payload))
     return { statusCode: 201, body: '', headers: {} }
-  })
+  }, liveClient(() => lowPrice))
   const credentials = push.add({ subscription, monitor })
   const auth = `Bearer ${credentials.token}`
   assert.deepEqual(push.get(credentials.id, auth).monitor, monitor)
@@ -51,7 +75,7 @@ test('sottoscrizioni protette da token; push deduplicate e nuove variazioni invi
   assert.match(payload.body, /possibile|errore/)
   assert.match(payload.url, /fuel=benzina/)
   assert.match(payload.url, /stationSelf=1/)
-  db.prepare('UPDATE prices SET price = 0.6 WHERE station_id = 1').run()
+  lowPrice = 0.6
   await push.scan()
   assert.equal(payloads.length, 2)
   push.remove(credentials.id, auth)
@@ -61,19 +85,20 @@ test('sottoscrizioni protette da token; push deduplicate e nuove variazioni invi
   db.close()
 })
 
-test('fallimenti di consegna non segnati come successo e copia vecchia sospende avvisi', async () => {
+test('fallimenti di consegna non segnati come successo e fonte live indisponibile sospende avvisi', async () => {
   const db = fixture()
   let attempts = 0
+  let sourceFails = false
   const push = createPushService(db, async () => {
     attempts++
     throw new webpush.WebPushError('temporary test error', 503, {}, '', subscription.endpoint)
-  })
+  }, liveClient(() => 0.5, () => sourceFails))
   push.add({ subscription, monitor })
   await push.scan()
   await push.scan()
   assert.equal(attempts, 2)
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM push_sent').get()!.n, 0)
-  setMetadata(db, 'lastRefreshAt', new Date(Date.now() - 48 * 3_600_000).toISOString())
+  sourceFails = true
   await push.scan()
   assert.equal(attempts, 2)
   db.close()
@@ -83,7 +108,7 @@ test('gateway 410 elimina sottoscrizione scaduta', async () => {
   const db = fixture()
   const push = createPushService(db, async () => {
     throw new webpush.WebPushError('gone', 410, {}, '', subscription.endpoint)
-  })
+  }, liveClient(() => 0.5))
   push.add({ subscription, monitor })
   await push.scan()
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM subscriptions').get()!.n, 0)

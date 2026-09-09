@@ -1,9 +1,9 @@
-import type { CatalogStation, Fuel, SearchArea, ServiceMode, StationResult, StationsResponse, StatusResponse } from '../shared/types'
-import { cellsFor, searchCatalog } from '../shared/catalog'
+import type { Fuel, SearchArea, ServiceMode, StationResult, StationsResponse } from '../shared/types'
 
 export const appBase = import.meta.env.BASE_URL
 const apiOrigin = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
-export const cloudCatalog = import.meta.env.VITE_CATALOG_MODE === 'true'
+export const cloudBackend = Boolean(apiOrigin)
+export const refreshIntervalMs = 60_000
 
 export const FUELS: { value: Fuel; label: string }[] = [
   { value: 'benzina', label: 'Benzina' },
@@ -124,12 +124,8 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
 export const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : 'Si è verificato un errore. Riprova tra poco.'
 
-export async function fetchStations(area: SearchArea, signal: AbortSignal): Promise<StationsResponse> {
-  if (!cloudCatalog) return api<StationsResponse>(`/api/stations?${areaQuery(area)}`, { signal })
-  const status = await api<StatusResponse>('/api/status', { signal })
-  if (!status.ready || !status.catalogVersion) throw new Error('Il catalogo ufficiale non e ancora disponibile.')
-  const tiles = await Promise.all(cellsFor(area).map((cell) =>
-    api<CatalogStation[]>(`/api/catalog/${encodeURIComponent(status.catalogVersion!)}/${cell}`, { signal })))
-  if (signal.aborted) throw new DOMException('Ricerca annullata', 'AbortError')
-  return searchCatalog(tiles.flat(), area, status)
+export async function fetchStations(area: SearchArea, signal: AbortSignal, refresh = false): Promise<StationsResponse> {
+  return api<StationsResponse>(`/api/stations?${areaQuery(area)}${refresh ? '&refresh=1' : ''}`, {
+    signal, cache: 'no-store',
+  })
 }

@@ -1,14 +1,10 @@
 import 'dotenv/config'
-import { randomBytes } from 'node:crypto'
 import webpush from 'web-push'
 import { z } from 'zod'
-import { createDataService } from '../server/data.ts'
-import { getMetadata, openDatabase } from '../server/storage.ts'
 import { monitorSchema, subscriptionSchema } from '../server/validation.ts'
-import { cellsFor, searchCatalog } from '../shared/catalog.ts'
 import { priceFingerprint, pushMessage } from '../shared/push-message.ts'
-import type { CatalogSnapshot, CatalogStation, CloudMonitor } from '../shared/types.ts'
-import { buildCatalog } from './catalog-builder.ts'
+import type { CloudMonitor, LiveStationDetail, StationsResponse } from '../shared/types.ts'
+import { unseenLiveAnomalies } from './live-monitor.ts'
 
 const env = z.object({
   API_URL: z.url(),
@@ -41,52 +37,8 @@ async function request<T>(path: string, method = 'GET', body?: unknown): Promise
   return await response.json() as T
 }
 
-async function currentSnapshot() {
-  try { return await request<CatalogSnapshot>('/internal/snapshot') }
-  catch (error) {
-    if (error instanceof RemoteError && error.status === 404) return null
-    throw error
-  }
-}
-
 async function main() {
   await request('/internal/cleanup', 'POST', {})
-  let snapshot = await currentSnapshot()
-  const catalog = new Map<string, CatalogStation[]>()
-  if (!snapshot?.lastRefreshAt || Date.now() - Date.parse(snapshot.lastRefreshAt) > 6 * 3_600_000) {
-    const db = openDatabase(':memory:')
-    try {
-      const data = createDataService(db)
-      await data.refresh()
-      if (!data.status().ready) throw new Error(getMetadata(db, 'refreshError') || 'Importazione MIMIT non completata.')
-      const status = data.status()
-      if (snapshot && (status.stationCount < snapshot.stationCount * 0.8 || status.priceCount < snapshot.priceCount * 0.8)) {
-        throw new Error('Il nuovo catalogo ha perso oltre il 20% delle righe: copia precedente conservata.')
-      }
-      const tiles = buildCatalog(db)
-      const next: CatalogSnapshot = {
-        ...status, catalogVersion: randomBytes(16).toString('hex'), cells: [...tiles.keys()].sort(),
-      }
-      await request('/internal/snapshot/begin', 'POST', { snapshot: next })
-      for (const [cell, tile] of tiles) {
-        await request(`/internal/snapshot/${next.catalogVersion}/tiles/${cell}`, 'PUT', tile)
-      }
-      await request(`/internal/snapshot/${next.catalogVersion}/commit`, 'POST', {})
-      snapshot = next
-      for (const [cell, tile] of tiles) catalog.set(cell, tile)
-      console.info(`Catalogo pubblicato: ${next.sourceDate}, ${next.stationCount} impianti, ${next.priceCount} prezzi, ${next.cells.length} celle.`)
-    } catch (error) {
-      console.error('Aggiornamento cloud fallito:', error instanceof Error ? error.message : 'errore sconosciuto')
-      process.exitCode = 1
-      await request('/internal/snapshot/failure', 'POST', { error: 'Aggiornamento MIMIT non riuscito. Manteniamo la copia precedente e riproviamo al prossimo job.' })
-      snapshot = await currentSnapshot()
-    } finally { db.close() }
-  }
-  if (!snapshot?.lastRefreshAt) throw new Error('Nessun catalogo disponibile per il monitoraggio.')
-  if (Date.now() - Date.parse(snapshot.lastRefreshAt) > 36 * 3_600_000) {
-    console.warn('Invii push sospesi: copia locale vecchia di oltre 36 ore.')
-    return
-  }
   webpush.setVapidDetails(env.APP_URL, env.VAPID_PUBLIC_KEY, env.VAPID_PRIVATE_KEY)
   let cursor: string | null = null
   let sentCount = 0
@@ -98,14 +50,20 @@ async function main() {
       const monitor = monitorSchema.parse(JSON.parse(row.monitor))
       const subscription = subscriptionSchema.parse(JSON.parse(row.subscription))
       const seen = new Set(z.array(z.string()).parse(JSON.parse(row.sent)))
-      const cells = cellsFor(monitor)
-      for (const cell of cells) {
-        if (!catalog.has(cell)) {
-          catalog.set(cell, await request<CatalogStation[]>(`/api/catalog/${snapshot.catalogVersion}/${cell}`))
-        }
+      const query = new URLSearchParams({
+        lat: String(monitor.lat), lon: String(monitor.lon), radius: String(monitor.radius),
+        fuel: monitor.fuel, service: monitor.service,
+      })
+      let stations
+      try {
+        const result = await request<StationsResponse>(`/api/stations?${query}`)
+        stations = await unseenLiveAnomalies(result, monitor, seen,
+          (id) => request<LiveStationDetail>(`/api/stations/${id}?refresh=1`))
+      } catch (error) {
+        console.error(`Monitoraggio ${row.id} sospeso: ${error instanceof Error ? error.message : 'fonte non disponibile'}. Nessun avviso basato su prezzi vecchi.`)
+        process.exitCode = 1
+        continue
       }
-      const stations = searchCatalog(cells.flatMap((cell) => catalog.get(cell)!), monitor, snapshot).stations
-        .filter((station) => station.isAnomaly && !seen.has(priceFingerprint(station, monitor)))
       if (!stations.length) continue
       try {
         await webpush.sendNotification(subscription, JSON.stringify(pushMessage(row.id, monitor, stations, new URL(env.APP_URL).pathname)), {

@@ -21,6 +21,7 @@ class MockD1 {
   db = new DatabaseSync(':memory:')
   constructor() {
     this.db.exec(readFileSync(new URL('./migrations/0001_initial.sql', import.meta.url), 'utf8'))
+    this.db.exec(readFileSync(new URL('./migrations/0002_live_cache.sql', import.meta.url), 'utf8'))
   }
   prepare(sql: string) { return new D1Stmt(this.db, sql) }
   async batch<T>(statements: { run(): Promise<T> }[]) { return Promise.all(statements.map((s) => s.run())) }
@@ -66,6 +67,9 @@ test('CORS preflight and protected internal routes are separated', async () => {
     assert.equal(preflight.status, 204)
     assert.equal(preflight.headers.get('access-control-allow-origin'), 'http://localhost:5173')
     assert.equal(preflight.headers.get('vary'), 'Origin')
+    const stationsPreflight = await fetchWorker(api('/api/stations/50963', { method: 'OPTIONS', headers: { Origin: 'http://localhost:5173' } }), e)
+    assert.equal(stationsPreflight.status, 204)
+    assert.equal(stationsPreflight.headers.get('access-control-allow-origin'), 'http://localhost:5173')
     const denied = await fetchWorker(api('/api/push/subscriptions', { method: 'POST', headers: { Origin: 'https://evil.test' } }), e)
     assert.equal(denied.status, 403)
     const internal = await fetchWorker(api('/internal/snapshot', { headers: { Origin: 'http://localhost:5173' } }), e)
@@ -74,12 +78,97 @@ test('CORS preflight and protected internal routes are separated', async () => {
   } finally { mock.close() }
 })
 
+test('live stations and detail use D1 cache, refresh bypass and CORS', async () => {
+  const { mock, env: e } = env()
+  e.MIMIT_API_URL = 'https://mimit.test/ospzApi/'
+  const originalFetch = globalThis.fetch
+  const calls: { url: string; body: unknown }[] = []
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input)
+    calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null })
+    if (url.endsWith('/search/zone')) {
+      return new Response(JSON.stringify({
+        success: true,
+        results: [{
+          id: 60905, name: 'ROMA DI BOCCEA353', brand: 'PompeBianche', address: null,
+          location: { lat: 41.9084849, lng: 12.4065966 }, insertDate: '2026-09-08T21:47:11+02:00',
+          fuels: [{ fuelId: 1, price: 1.623, isSelf: true }, { fuelId: 2, price: 1.612, isSelf: true }],
+        }],
+      }))
+    }
+    return new Response(JSON.stringify({
+      id: 60905, name: 'ROMA DI BOCCEA353', address: 'Via live', brand: 'PompeBianche',
+      fuels: [{ fuelId: 1, price: 1.621, isSelf: true, insertDate: '2026-09-09T06:10:42Z' }],
+    }))
+  }) as typeof fetch
+  try {
+    const headers = { Origin: 'http://localhost:5173', 'CF-Connecting-IP': '203.0.113.10' }
+    const query = '/api/stations?lat=41.9028&lon=12.4964&radius=30&fuel=benzina&service=self'
+    let res = await fetchWorker(api(query, { headers }), e)
+    assert.equal(res.status, 200)
+    assert.equal(res.headers.get('access-control-allow-origin'), 'http://localhost:5173')
+    let body = await res.json() as { dataSource: string; sourceDate: string | null; cacheMaxAgeSeconds: number; stations: { price: number; lon: number; reportedAtScope: string }[] }
+    assert.equal(body.dataSource, 'live')
+    assert.equal(body.sourceDate, null)
+    assert.equal(body.cacheMaxAgeSeconds, 120)
+    assert.equal(body.stations[0]!.price, 1.623)
+    assert.equal(body.stations[0]!.lon, 12.4065966)
+    assert.equal(body.stations[0]!.reportedAtScope, 'station')
+    assert.deepEqual(calls[0]!.body, { points: [{ lat: 41.9028, lng: 12.4964 }], radius: 30, fuelType: '1-x', priceOrder: 'asc' })
+    res = await fetchWorker(api(query, { headers }), e)
+    assert.equal(res.status, 200)
+    assert.equal(calls.length, 1)
+    res = await fetchWorker(api(`${query}&refresh=1`, { headers }), e)
+    assert.equal(res.status, 200)
+    assert.equal(calls.length, 2)
+    res = await fetchWorker(api('/api/stations/60905', { headers }), e)
+    assert.equal(res.status, 200)
+    const detail = await res.json() as { prices: { price: number; reportedAt: string }[] }
+    assert.equal(detail.prices[0]!.price, 1.621)
+    assert.equal(detail.prices[0]!.reportedAt, '2026-09-09T06:10:42.000Z')
+  } finally {
+    globalThis.fetch = originalFetch
+    mock.close()
+  }
+})
+
+test('live source requests are rate limited per IP when uncached', async () => {
+  const { mock, env: e } = env()
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = (async (input) => {
+    const url = String(input)
+    if (url.includes('/registry/servicearea/')) {
+      return new Response(JSON.stringify({ id: 60905, name: 'Test', address: '', brand: 'Test', fuels: [] }))
+    }
+    return new Response(JSON.stringify({ success: true, results: [] }))
+  }) as typeof fetch
+  try {
+    const headers = { 'CF-Connecting-IP': '203.0.113.20' }
+    const query = '/api/stations?lat=41.9&lon=12.5&radius=5&fuel=benzina&service=self&refresh=1'
+    for (let i = 0; i < 30; i++) assert.equal((await fetchWorker(api(query, { headers }), e)).status, 200)
+    assert.equal((await fetchWorker(api(query, { headers }), e)).status, 429)
+    assert.equal((await fetchWorker(api(query, { headers: { ...headers, Authorization: 'Bearer wrong-secret' } }), e)).status, 429)
+    for (let i = 0; i < 35; i++) {
+      const path = i % 2 ? query : '/api/stations/60905?refresh=1'
+      assert.equal((await fetchWorker(api(path, { headers: { ...headers, Authorization: 'Bearer job-secret' } }), e)).status, 200)
+    }
+  } finally {
+    globalThis.fetch = originalFetch
+    mock.close()
+  }
+})
+
 test('catalog snapshot commit is atomic and serves raw immutable tiles', async () => {
   const { mock, env: e } = env()
   try {
     let res = await fetchWorker(api('/api/status'), e)
     assert.equal(res.status, 200)
-    assert.equal((await res.json() as { ready: boolean }).ready, false)
+    const publicStatus = await res.json() as { ready: boolean; dataSource: string; sourceDate: string | null; stationCount: number; priceCount: number }
+    assert.equal(publicStatus.ready, true)
+    assert.equal(publicStatus.dataSource, 'live')
+    assert.equal(publicStatus.sourceDate, null)
+    assert.equal(publicStatus.stationCount, 0)
+    assert.equal(publicStatus.priceCount, 0)
     res = await fetchWorker(api('/internal/snapshot/begin', {
       method: 'POST', headers: { ...auth(), 'Content-Type': 'application/json' }, body: JSON.stringify({ snapshot }),
     }), e)
@@ -88,9 +177,9 @@ test('catalog snapshot commit is atomic and serves raw immutable tiles', async (
     assert.equal((await fetchWorker(api(`/internal/snapshot/${snapshot.catalogVersion}/tiles/41_12`, { method: 'PUT', headers: auth(), body: '[{"id":1,"prices":[]}]' }), e)).status, 200)
     assert.equal((await fetchWorker(api(`/internal/snapshot/${snapshot.catalogVersion}/tiles/42_12`, { method: 'PUT', headers: auth(), body: '[]' }), e)).status, 200)
     assert.equal((await fetchWorker(api(`/internal/snapshot/${snapshot.catalogVersion}/commit`, { method: 'POST', headers: auth() }), e)).status, 200)
-    const status = await fetchWorker(api('/api/status'), e).then((r) => r.json()) as { ready: boolean; catalogVersion: string }
-    assert.equal(status.ready, true)
-    assert.equal(status.catalogVersion, snapshot.catalogVersion)
+    const internalStatus = await fetchWorker(api('/internal/snapshot', { headers: auth() }), e).then((r) => r.json()) as { ready: boolean; catalogVersion: string }
+    assert.equal(internalStatus.ready, true)
+    assert.equal(internalStatus.catalogVersion, snapshot.catalogVersion)
     const tile = await fetchWorker(api(`/api/catalog/${snapshot.catalogVersion}/41_12`, { headers: { Origin: 'http://localhost:5173' } }), e)
     assert.equal(tile.status, 200)
     assert.equal(tile.headers.get('cache-control'), 'public, max-age=86400, immutable')
@@ -106,7 +195,7 @@ test('catalog snapshot commit is atomic and serves raw immutable tiles', async (
       await fetchWorker(api(`/internal/snapshot/${older.catalogVersion}/tiles/${cell}`, { method: 'PUT', headers: auth(), body: '[]' }), e)
     }
     assert.equal((await fetchWorker(api(`/internal/snapshot/${older.catalogVersion}/commit`, { method: 'POST', headers: auth() }), e)).status, 409)
-    const unchanged = await fetchWorker(api('/api/status'), e).then((r) => r.json()) as { catalogVersion: string }
+    const unchanged = await fetchWorker(api('/internal/snapshot', { headers: auth() }), e).then((r) => r.json()) as { catalogVersion: string }
     assert.equal(unchanged.catalogVersion, snapshot.catalogVersion)
   } finally { mock.close() }
 })

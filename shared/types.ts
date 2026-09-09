@@ -37,6 +37,7 @@ export interface StationResult {
   isAnomaly: boolean
   discountPercent: number
   peerMedian: number | null
+  reportedAtScope?: 'price' | 'station'
 }
 
 export interface StationsResponse {
@@ -47,6 +48,8 @@ export interface StationsResponse {
   updatedAt: string | null
   sourceDate: string | null
   warning: string | null
+  dataSource?: 'live' | 'daily'
+  cacheMaxAgeSeconds?: number
   analysis: {
     minimumPeers: number
     thresholdPercent: number
@@ -63,6 +66,7 @@ export interface StatusResponse {
   priceCount: number
   warning: string | null
   catalogVersion?: string
+  dataSource?: 'live' | 'daily'
 }
 
 export interface PushCredentials {
@@ -97,4 +101,18 @@ export interface CloudMonitor {
   subscription: string
   monitor: string
   sent: string
+}
+
+export interface LiveStationDetail {
+  id: number
+  name: string
+  address: string
+  brand: string
+  updatedAt: string
+  prices: {
+    fuel: Fuel
+    self: boolean
+    price: number
+    reportedAt: string
+  }[]
 }

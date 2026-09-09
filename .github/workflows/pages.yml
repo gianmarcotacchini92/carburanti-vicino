@@ -28,7 +28,6 @@ jobs:
         env:
           VITE_BASE_PATH: /carburanti-vicino/
           VITE_API_URL: ${{ vars.API_URL }}
-          VITE_CATALOG_MODE: "true"
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

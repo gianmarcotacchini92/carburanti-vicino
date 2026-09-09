@@ -1,13 +1,16 @@
 import { config } from './config.ts'
 import { database } from './storage.ts'
-import { createDataService } from './data.ts'
 import { createPushService } from './push.ts'
 import { createApp } from './app.ts'
+import type { StatusResponse } from '../shared/types.ts'
 
 const db = database()
-const data = createDataService(db)
 const push = createPushService(db)
-const app = createApp(db, push, data.status)
+const liveStatus = (): StatusResponse => ({
+  ready: true, refreshing: false, lastRefreshAt: null, sourceDate: null,
+  stationCount: 0, priceCount: 0, warning: null, dataSource: 'live',
+})
+const app = createApp(db, push, liveStatus)
 const server = app.listen(config.PORT, config.HOST, () => {
   console.info(`Pieno API: http://${config.HOST}:${config.PORT}`)
   console.info(`Archivio persistente: ${config.dataDir}`)
@@ -16,7 +19,6 @@ server.on('error', (error) => { console.error('Avvio server fallito:', error.mes
 
 async function tick() {
   db.prepare('DELETE FROM geocode_cache WHERE created_at < ?').run(Date.now() - 7 * 86_400_000)
-  await data.refreshIfDue()
   await push.scan()
 }
 void tick().catch((error: unknown) => console.error('Ciclo iniziale fallito:', error))

@@ -52,7 +52,7 @@ for (let attempt = 0; ; attempt++) {
   }
   await new Promise((resolve) => setTimeout(resolve, 2000))
 }
-console.info('Configurazione privata completata. Avvio della prima importazione cloud.')
+console.info('Configurazione privata completata. Avvio del controllo dei prezzi correnti.')
 const job = spawnSync(process.execPath, ['--import', 'tsx', 'jobs/run.ts'], {
   stdio: 'inherit',
   env: {
@@ -60,4 +60,4 @@ const job = spawnSync(process.execPath, ['--import', 'tsx', 'jobs/run.ts'], {
     VAPID_PUBLIC_KEY: keys.publicKey, VAPID_PRIVATE_KEY: keys.privateKey,
   },
 })
-if (job.error || job.status !== 0) throw new Error('Primo aggiornamento non riuscito. Il bootstrap puo essere rieseguito senza cambiare le chiavi.')
+if (job.error || job.status !== 0) throw new Error('Controllo prezzi non riuscito. Il bootstrap puo essere rieseguito senza cambiare le chiavi.')

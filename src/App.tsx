@@ -5,12 +5,13 @@ import {
   List, LoaderCircle, LocateFixed, Map as MapIcon, MapPin, Navigation, RefreshCw,
   Search, ShieldCheck, SlidersHorizontal, TriangleAlert, X,
 } from 'lucide-react'
-import type { Place, SearchArea, ServiceMode, StationResult, StationsResponse, StatusResponse } from '../shared/types'
+import type { LiveStationDetail, Place, SearchArea, ServiceMode, StationResult, StationsResponse, StatusResponse } from '../shared/types'
+import { applyLiveDetail } from '../shared/live-details'
 import MapView from './MapView'
 import MonitorPanel from './MonitorPanel'
 import {
   api, appBase, areaQuery, dateFormat, distanceFormat, errorMessage, fetchStations, FUELS, fuelLabel,
-  initialSearch, moneyFormat, priceFormat, RADII, serviceLabel, snapshotLabel, stationKey, unitFor,
+  initialSearch, moneyFormat, priceFormat, RADII, refreshIntervalMs, serviceLabel, snapshotLabel, stationKey, unitFor,
 } from './lib'
 import './App.css'
 
@@ -67,12 +68,12 @@ function StationCard({ station, selected, onSelect }: { station: StationResult; 
           <span className="station-title"><strong>{station.name}</strong><span>{station.brand || 'Distributore indipendente'}</span></span>
           <span className="station-distance"><Navigation size={11} />{distanceFormat(station.distanceKm)}</span>
         </div>
-        <span className="station-address">{[station.address, station.town].filter(Boolean).join(', ')}</span>
+        <span className="station-address">{[station.address, station.town].filter(Boolean).join(', ') || 'Seleziona per consultare indirizzo e dettaglio MIMIT'}</span>
         <span className="station-price-row">
           <span className="service-pill">{station.self ? 'Self service' : 'Servito'}</span>
           <span className="station-price">{priceFormat(station.price)}<small>€/{station.unit}</small></span>
         </span>
-        <span className="station-date"><Clock3 size={12} />Comunicazione {dateFormat(station.reportedAt, true)} · MIMIT</span>
+        <span className="station-date"><Clock3 size={12} />{station.reportedAtScope === 'station' ? 'Ultima comunicazione impianto' : 'Comunicazione prezzo'} {dateFormat(station.reportedAt, true)} · MIMIT</span>
         {(station.isStale || station.isAnomaly) && <span className="station-badges">
           {station.isStale && <span className="badge badge-stale"><Clock3 size={12} />Dato oltre 7 giorni</span>}
           {station.isAnomaly && <span className="badge badge-anomaly"><TriangleAlert size={12} />Possibile anomalia</span>}
@@ -99,7 +100,10 @@ function App() {
   const [locating, setLocating] = useState(false)
   const [status, setStatus] = useState<StatusResponse | null>(null)
   const [statusError, setStatusError] = useState('')
-  const [result, setResult] = useState<StationsResponse | null>(null)
+  const [searchResult, setResult] = useState<StationsResponse | null>(null)
+  const [detailState, setDetailState] = useState<{
+    key: string; detail?: LiveStationDetail; error?: string; loading: boolean
+  } | null>(null)
   const [loading, setLoading] = useState(true)
   const [stationError, setStationError] = useState('')
   const [reload, setReload] = useState(0)
@@ -113,6 +117,15 @@ function App() {
   const locationVersion = useRef(0)
   const latestStationRequest = useRef(0)
   const selectedRef = useRef<string | number | null>(initial.stationKey ?? initial.stationId)
+  const forceRefresh = useRef(false)
+  const detailStation = searchResult?.stations.find((station) => stationKey(station) === selectedKey)
+  const detailId = detailStation?.id
+  const detailKey = searchResult?.dataSource === 'live' && detailId !== undefined
+    ? `${areaQuery(area)}:${searchResult.updatedAt}:${reload}:${detailId}` : null
+  const currentDetail = detailState?.key === detailKey ? detailState : null
+  const result = searchResult && currentDetail?.detail
+    ? applyLiveDetail(searchResult, currentDetail.detail, area.fuel) : searchResult
+  const detailPending = detailKey !== null && (!currentDetail || currentDetail.loading)
 
   const checkStatus = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -140,7 +153,7 @@ function App() {
     const onVisible = () => {
       if (document.visibilityState === 'visible') {
         void checkStatus(controller.signal)
-        if (Date.now() - latestStationRequest.current >= 5 * 60 * 1000) setReload((value) => value + 1)
+        if (Date.now() - latestStationRequest.current >= refreshIntervalMs) setReload((value) => value + 1)
       }
     }
     document.addEventListener('visibilitychange', onVisible)
@@ -154,7 +167,7 @@ function App() {
   useEffect(() => {
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'visible') setReload((value) => value + 1)
-    }, 5 * 60 * 1000)
+    }, refreshIntervalMs)
     return () => window.clearInterval(interval)
   }, [])
 
@@ -172,7 +185,9 @@ function App() {
       setStationError('')
       setResult(null)
       latestStationRequest.current = Date.now()
-      void fetchStations(area, controller.signal)
+      const refresh = forceRefresh.current
+      forceRefresh.current = false
+      void fetchStations(area, controller.signal, refresh)
         .then((data) => {
           if (controller.signal.aborted) return
           setResult(data)
@@ -192,6 +207,26 @@ function App() {
     })
     return () => controller.abort()
   }, [area, status?.ready, reload])
+
+  useEffect(() => {
+    if (!detailKey || detailId === undefined) return
+    const controller = new AbortController()
+    queueMicrotask(() => {
+      if (controller.signal.aborted) return
+      setDetailState({ key: detailKey, loading: true })
+      void api<LiveStationDetail>(`/api/stations/${detailId}?refresh=1`, {
+        signal: controller.signal, cache: 'no-store',
+      }).then((detail) => {
+        if (detail.id !== detailId) throw new Error('Il Ministero ha restituito il dettaglio di un altro impianto.')
+        if (!controller.signal.aborted) setDetailState({ key: detailKey, detail, loading: false })
+      }).catch((reason: unknown) => {
+        if (!controller.signal.aborted) setDetailState({
+          key: detailKey, error: `Dettaglio MIMIT non disponibile. ${errorMessage(reason)}`, loading: false,
+        })
+      })
+    })
+    return () => controller.abort()
+  }, [detailKey, detailId])
 
   useEffect(() => () => {
     searchController.current?.abort()
@@ -299,6 +334,11 @@ function App() {
   }
 
   function retry() {
+    forceRefresh.current = true
+    stationController.current?.abort()
+    setResult(null)
+    setStationError('')
+    setLoading(true)
     void checkStatus()
     setReload((value) => value + 1)
   }
@@ -310,6 +350,7 @@ function App() {
   const dataWaiting = status !== null && !status.ready
   const initialLoading = status === null && !statusError
   const visibleError = stationError || (!status?.ready ? statusError : '')
+  const live = result?.dataSource === 'live' || status?.dataSource === 'live'
 
   return (
     <>
@@ -397,9 +438,11 @@ function App() {
         <div className="results-heading">
           <div className="area-heading"><MapPin size={16} /><h2 title={label}>{label}</h2><span className="area-radius">entro {area.radius} km</span></div>
           <div className="source-update"><span className={`status-dot${!status?.ready ? ' pending' : ''}`} />
-            {status?.ready ? snapshotLabel(result?.sourceDate ?? status.sourceDate) : dataWaiting ? 'Preparazione dati ufficiali' : 'Connessione alla fonte'}
+            {live ? result?.updatedAt ? `Consultazione MIMIT: ${dateFormat(result.updatedAt, true)}` : 'Ricerca corrente MIMIT'
+              : status?.ready ? snapshotLabel(result?.sourceDate ?? status.sourceDate) : dataWaiting ? 'Preparazione dati ufficiali' : 'Connessione alla fonte'}
             <button className="icon-button refresh-button" aria-label="Aggiorna prezzi" title="Aggiorna prezzi" onClick={retry} disabled={loading || initialLoading}><RefreshCw size={14} className={loading ? 'spin' : ''} /></button>
           </div>
+          {live && <p className="list-footnote"><Info size={13} /><span>Prezzi dal portale corrente, non dai CSV del giorno precedente. Cache massima 2 minuti; “Aggiorna prezzi” richiede una nuova lettura al MIMIT.</span></p>}
         </div>
         {(status?.warning || result?.warning || (status?.ready && statusError)) && (
           <div className="data-warning" role="status"><Info size={17} /><span>{result?.warning || status?.warning || statusError}</span></div>
@@ -449,7 +492,11 @@ function App() {
           </div>
         </section>
 
-        <CalculatorPanel station={selected} median={result?.medianPrice ?? null} fuel={area.fuel} />
+        {detailPending && <p className="data-warning" role="status"><LoaderCircle className="spin" size={16} />Controllo il prezzo selezionato nella scheda corrente MIMIT…</p>}
+        {currentDetail?.error && <div className="data-warning" role="alert"><TriangleAlert size={16} /><span>{currentDetail.error} I prezzi nell’elenco sono quelli della ricerca precedente, il calcolo è sospeso.</span><button className="text-button" onClick={retry}>Riprova dettaglio</button></div>}
+        {currentDetail?.detail && !selected && <p className="data-warning" role="status">Il prezzo selezionato non è più presente nella scheda MIMIT. Seleziona un altro distributore o aggiorna la ricerca.</p>}
+        {currentDetail?.detail && selected && <p className="list-footnote">Scheda impianto consultata: {dateFormat(currentDetail.detail.updatedAt, true)}.</p>}
+        <CalculatorPanel station={detailPending || currentDetail?.error ? undefined : selected} median={result?.medianPrice ?? null} fuel={area.fuel} />
         <MonitorPanel area={area} label={label} />
 
         <section className="info-section" id="informazioni">
@@ -457,9 +504,9 @@ function App() {
             <span><CircleHelp size={19} /><strong>Buono a sapersi</strong><span>Dati, anomalie e privacy</span></span><ChevronDown size={18} className={infoOpen ? 'rotate' : ''} />
           </button>
           {infoOpen && <div className="info-content" id="info-content">
-            <div><Database size={20} /><h3>Ufficiali, non in tempo reale</h3><p>I prezzi provengono dagli open data giornalieri del MIMIT — Osservaprezzi Carburanti. Sono comunicazioni dei gestori, non prezzi rilevati dal vivo. Verifica sempre il prezzo e la modalità alla pompa.</p><p>I file sono pubblicati ogni giorno e riportano i dati riferiti alle 08:00 del giorno precedente. La data indicata è quella della fotografia dei dati, non la data di pubblicazione o di download.</p><p>{snapshotLabel(result?.sourceDate ?? status?.sourceDate ?? null)}.<br />Ultimo download riuscito: {dateFormat(status?.lastRefreshAt ?? null, true)}.<br />La pagina aggiorna i prezzi ogni 5 minuti quando è visibile.</p><p>Pieno è un servizio non ufficiale. I dati MIMIT sono riutilizzati secondo la licenza IODL 2.0.</p><div className="source-links"><a href="https://www.mimit.gov.it/it/open-data/elenco-dataset/carburanti-prezzi-praticati-e-anagrafica-degli-impianti" target="_blank" rel="noreferrer">Consulta la fonte MIMIT<ExternalLink size={12} /><span className="sr-only"> (nuova scheda)</span></a><a href="https://www.dati.gov.it/content/italian-open-data-license-v20" target="_blank" rel="noreferrer">Leggi la licenza IODL 2.0<ExternalLink size={12} /><span className="sr-only"> (nuova scheda)</span></a></div></div>
-            <div><TriangleAlert size={20} /><h3>Un’anomalia, non una promessa</h3><p>Segnaliamo un prezzo almeno il 25% sotto la mediana di almeno 5 <strong>altri</strong> distributori con lo stesso carburante e la stessa modalità (self o servito), nel raggio scelto. Escludiamo dall’analisi i prezzi più vecchi di 7 giorni.</p><p>Un prezzo insolito può essere un errore di comunicazione: non è un errore accertato né un risparmio garantito. La mediana di zona nel riepilogo è distinta da quella dei pari usata per l’anomalia.</p></div>
-            <div><ShieldCheck size={20} /><h3>La tua zona, non i tuoi spostamenti</h3><p>La posizione viene richiesta solo quando premi il pulsante dedicato. Inviamo le coordinate della ricerca al server e, se attivi gli avvisi, conserviamo la zona monitorata e l’iscrizione push. Nessun tracciamento della posizione in background.</p><p>Le mappe contattano OpenStreetMap; gli indirizzi cercati vengono inoltrati a Photon. Questi servizi terzi ricevono i dati necessari al servizio. Le credenziali degli avvisi restano in questo browser. Disattivando gli avvisi elimini il monitoraggio dal server.</p></div>
+            <div><Database size={20} /><h3>Prezzi correnti del portale MIMIT</h3><p>La ricerca consulta il servizio utilizzato dal portale Osservaprezzi, non i CSV che fotografano il giorno precedente. Una cache di massimo 2 minuti limita le richieste; il pulsante “Aggiorna prezzi” la salta. La pagina aggiorna la ricerca ogni minuto quando è visibile.</p><p>La data “Consultazione MIMIT” indica quando abbiamo letto il servizio. “Ultima comunicazione impianto” è la data complessiva restituita dalla ricerca: non certifica la data di ogni carburante. Selezionando un distributore consultiamo la sua scheda con l’indirizzo e la data specifica del prezzo e ricalcoliamo il pieno.</p><p>Se il servizio non risponde, mostriamo l’errore senza ripiegare sui prezzi giornalieri. Il servizio usato dal portale non ha un contratto pubblico di disponibilità per applicazioni esterne e può cambiare. Restano prezzi comunicati dagli esercenti, non rilevati alla pompa: verifica sempre carburante e modalità.</p>{!live && <p>{snapshotLabel(result?.sourceDate ?? status?.sourceDate ?? null)}: risposta giornaliera di una versione precedente del backend.</p>}<div className="source-links"><a href="https://carburanti.mise.gov.it/ospzSearch/" target="_blank" rel="noreferrer">Apri Osservaprezzi MIMIT<ExternalLink size={12} /><span className="sr-only"> (nuova scheda)</span></a><a href="https://www.mimit.gov.it/it/open-data/elenco-dataset/carburanti-prezzi-praticati-e-anagrafica-degli-impianti" target="_blank" rel="noreferrer">Informazioni sui CSV giornalieri<ExternalLink size={12} /><span className="sr-only"> (nuova scheda)</span></a></div></div>
+            <div><TriangleAlert size={20} /><h3>Un’anomalia, non una promessa</h3><p>Segnaliamo un prezzo almeno il 25% sotto la mediana di almeno 5 <strong>altri</strong> distributori con lo stesso carburante e la stessa modalità (self o servito), nel raggio scelto. Gli indicatori sulla mappa sono preliminari e usano la data complessiva dell’impianto quando manca quella del singolo prezzo. Prima delle notifiche ricontrolliamo le schede e scartiamo i prezzi più vecchi di 7 giorni; se la verifica fallisce, l’avviso non parte.</p><p>Un prezzo insolito può essere un errore di comunicazione: non è un errore accertato né un risparmio garantito. La mediana di zona nel riepilogo è distinta da quella dei pari usata per l’anomalia.</p></div>
+            <div><ShieldCheck size={20} /><h3>La tua zona, non i tuoi spostamenti</h3><p>La posizione viene richiesta solo quando premi il pulsante dedicato. Inviamo le coordinate della ricerca al server e al servizio MIMIT e, se attivi gli avvisi, conserviamo la zona monitorata e l’iscrizione push. Nessun tracciamento della posizione in background.</p><p>Le mappe contattano OpenStreetMap; gli indirizzi cercati vengono inoltrati a Photon. Questi servizi terzi ricevono i dati necessari al servizio. Le credenziali degli avvisi restano in questo browser. Disattivando gli avvisi elimini il monitoraggio dal server.</p></div>
           </div>}
         </section>
       </main>
@@ -467,7 +514,7 @@ function App() {
         <a className="brand footer-brand" href={appBase}><FuelIcon size={20} />Pieno<span>.</span></a>
         <p>La strada è tua. La scelta, anche.</p>
         <div className="footer-attribution">
-          <p>Fonte: <a href="https://www.mimit.gov.it/it/open-data/elenco-dataset/carburanti-prezzi-praticati-e-anagrafica-degli-impianti" target="_blank" rel="noreferrer">Ministero delle Imprese e del Made in Italy — Osservaprezzi Carburanti</a>{' · '}<a href="https://www.dati.gov.it/content/italian-open-data-license-v20" target="_blank" rel="noreferrer">IODL 2.0</a>{' · '}Servizio non ufficiale</p>
+          <p>Fonte: <a href="https://carburanti.mise.gov.it/ospzSearch/" target="_blank" rel="noreferrer">Ministero delle Imprese e del Made in Italy — Osservaprezzi Carburanti</a>{' · '}Servizio non ufficiale</p>
           <p>Mappe © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a></p>
         </div>
       </footer>

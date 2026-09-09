@@ -185,7 +185,7 @@ test('small-screen map/list views do not overflow and preserve selection', async
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
 
-test('prices refresh every five minutes only while visible, then refresh on return', async ({ page }) => {
+test('prices refresh every minute only while visible, then refresh on return', async ({ page }) => {
   let requests = 0
   await page.clock.install()
   await page.route('**/api/stations?*', (route) => {
@@ -195,7 +195,7 @@ test('prices refresh every five minutes only while visible, then refresh on retu
   await page.goto('/')
   await expect(page.getByTestId('station-card')).toHaveCount(3)
   const firstCount = requests
-  await page.clock.fastForward(5 * 60 * 1000)
+  await page.clock.fastForward(60 * 1000)
   await expect.poll(() => requests).toBe(firstCount + 1)
   await expect(page.getByTestId('station-card')).toHaveCount(3)
   await page.evaluate(() => Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }))
@@ -260,7 +260,7 @@ test('dense areas declutter price labels without removing stations and keep the 
 test.describe('official source attribution', () => {
   test.use({ timezoneId: 'America/Los_Angeles' })
 
-  test('shows the IODL licence and the 08:00 snapshot date independently of download date and browser timezone', async ({ page }) => {
+  test('attributes the portal and clearly distinguishes legacy snapshot dates from current queries', async ({ page }) => {
     await page.route('**/api/status', (route) => route.fulfill({
       json: { ...statusFixture, sourceDate: '2026-09-06', lastRefreshAt: '2026-09-07T11:00:00+02:00' },
     }))
@@ -268,13 +268,12 @@ test.describe('official source attribution', () => {
     await page.goto('/')
     await expect(page.locator('.source-update')).toContainText('Dati riferiti alle 08:00 del 06 set 2026')
     const footer = page.getByRole('contentinfo')
-    await expect(footer).toContainText('Fonte: Ministero delle Imprese e del Made in Italy — Osservaprezzi Carburanti · IODL 2.0 · Servizio non ufficiale')
-    await expect(footer.getByRole('link', { name: 'IODL 2.0', exact: true })).toHaveAttribute('href', 'https://www.dati.gov.it/content/italian-open-data-license-v20')
-    await expect(footer.getByRole('link', { name: /Ministero delle Imprese/ })).toHaveAttribute('href', 'https://www.mimit.gov.it/it/open-data/elenco-dataset/carburanti-prezzi-praticati-e-anagrafica-degli-impianti')
+    await expect(footer).toContainText('Fonte: Ministero delle Imprese e del Made in Italy — Osservaprezzi Carburanti · Servizio non ufficiale')
+    await expect(footer.getByRole('link', { name: /Ministero delle Imprese/ })).toHaveAttribute('href', 'https://carburanti.mise.gov.it/ospzSearch/')
     await page.getByRole('button', { name: /Buono a sapersi/ }).click()
-    await expect(page.locator('#info-content')).toContainText('alle 08:00 del giorno precedente')
-    await expect(page.locator('#info-content')).toContainText('non la data di pubblicazione o di download')
+    await expect(page.locator('#info-content')).toContainText('non i CSV che fotografano il giorno precedente')
+    await expect(page.locator('#info-content')).toContainText('Una cache di massimo 2 minuti')
     await expect(page.locator('#info-content')).toContainText('Dati riferiti alle 08:00 del 06 set 2026')
-    await expect(page.locator('#info-content').getByRole('link', { name: /Leggi la licenza IODL 2.0/ })).toBeVisible()
+    await expect(page.locator('#info-content').getByRole('link', { name: /Apri Osservaprezzi MIMIT/ })).toBeVisible()
   })
 })
